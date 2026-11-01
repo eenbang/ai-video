@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI 图文配音演示视频生成系统</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M8 5.2v13.6L19 12 8 5.2Z" fill="#fff"/>
+              <path d="M17.2 4.2l1.1 2.1 2.1 1.1-2.1 1.1-1.1 2.1-1.1-2.1-2.1-1.1 2.1-1.1 1.1-2.1Z" fill="#fff" opacity=".85"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <div class="brand-title">图文配音视频</div>
+            <div class="brand-sub">AI 生成系统</div>
+          </div>
+        </div>
+        <nav class="nav" id="nav">
+          <button class="nav-item active" data-view="create">新建任务</button>
+          <button class="nav-item" data-view="tasks">任务列表</button>
+          <button class="nav-item" data-view="archive">归档区</button>
+          <button class="nav-item" data-view="check">环境自检</button>
+          <button class="nav-item" data-view="settings">设置</button>
+        </nav>
+        <div id="running-summary" class="running-summary" hidden></div>
+        <div class="sidebar-foot">
+          <span id="health-dot" class="dot"></span>
+          <span id="health-text">连接中…</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="topbar">
+          <button class="icon-btn" id="nav-back" title="返回">←</button>
+          <div class="topbar-spacer"></div>
+          <button class="icon-btn" id="nav-forward" title="前进">→</button>
+        </div>
+        <section id="view-create" class="view active"></section>
+        <section id="view-tasks" class="view"></section>
+        <section id="view-detail" class="view"></section>
+        <section id="view-archive" class="view"></section>
+        <section id="view-check" class="view"></section>
+        <section id="view-settings" class="view"></section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

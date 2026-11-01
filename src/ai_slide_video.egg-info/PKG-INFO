@@ -1,0 +1,220 @@
+Metadata-Version: 2.4
+Name: ai-slide-video
+Version: 0.1.0
+Summary: 主题/文案 -> 5 张统一风格画面 -> 逐页配音 -> MP4
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: Pillow>=11.0
+Requires-Dist: edge-tts>=7.0
+Requires-Dist: imageio-ffmpeg>=0.6.0
+Requires-Dist: fastapi>=0.115
+Requires-Dist: uvicorn>=0.32
+
+# AI 图文配音演示视频生成系统
+
+输入一个主题或一段中文文案，自动完成：
+
+```text
+主题/文案
+  -> 恰好 5 页分镜与解说词
+  -> 5 张统一风格的 16:9 画面
+  -> 逐页中文配音
+  -> 按配音时长合成 MP4
+  -> 字幕、清单与质量报告
+```
+
+## 环境要求
+
+- Windows 10/11
+- Python 3.11 或更高版本
+- 可访问 Edge TTS 服务（演示模式）
+- 使用 AI API 模式时，需要 OpenAI 或兼容服务的 API Key
+
+## 安装
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+Copy-Item .env.example .env
+```
+
+`imageio-ffmpeg` 会随 Python 依赖一起安装，不需要单独配置系统 FFmpeg。
+
+## 使用
+
+先检查运行环境：
+
+```powershell
+ai-video --check
+```
+
+生成一个演示视频：
+
+```powershell
+ai-video "大模型如何改变软件工程" --mode demo
+```
+
+也可以单独指定图像生成后端：
+
+```powershell
+ai-video "大模型如何改变软件工程" --image-backend comfyui
+```
+
+也可以直接运行仓库内脚本，不需要手动激活虚拟环境：
+
+```powershell
+.\run.ps1 "大模型如何改变软件工程" -Mode demo
+```
+
+也可以从 UTF-8 文本文件读取较长的文案：
+
+```powershell
+ai-video --input-file .\script.txt --mode demo
+```
+
+运行结束后，终端会输出任务 ID、任务目录、最终视频和清单路径。
+
+## 运行模式
+
+| 模式 | 内容规划 | 图片 | 配音 |
+|---|---|---|---|
+| `demo` | 本地分镜模板 | 本地 PIL 演示画面 | Edge TTS |
+| `api` | OpenAI 兼容接口 | OpenAI 兼容生图接口 | Edge TTS |
+| `auto` | 有 Key 时调用 API，失败时使用本地模板 | 由 `IMAGE_BACKEND` 决定 | Edge TTS |
+
+## 断点续跑
+
+生成过程中如果网络或接口中断，可以接着上次的进度继续，不会从头重跑。已经生成的分镜、图片、配音会直接复用，只补没完成的部分。
+
+续跑最近一次任务：
+
+```powershell
+ai-video --resume-latest
+```
+
+续跑指定任务（用任务 ID 或任务目录都行）：
+
+```powershell
+ai-video --resume outputs\20261031_221727_df4949_345719
+```
+
+## 归档与删除任务
+
+每次运行都会在 `outputs` 下新建一个任务目录。为了安全，分两步：先归档到 `_archive`，确认不要了再永久删除。
+
+归档（把任务移进 `_archive`，可恢复）：
+
+```powershell
+ai-video --archive outputs\<任务目录>   # 归档指定任务
+ai-video --archive-latest               # 归档最近一次任务
+ai-video --archive-all                  # 归档 outputs 下全部任务
+```
+
+永久删除（只能删 `_archive` 里的）：
+
+```powershell
+ai-video --delete <任务ID或目录>         # 删除 _archive 内指定任务
+ai-video --delete-all                    # 删除 _archive 内全部任务
+```
+
+对 `_archive` 外的任务不能直接删除，先 `--archive` 归档，再 `--delete`。
+
+演示画面会明确标注“非 AI 生图”，适合在没有生图额度时验证完整流程。若需要 AI 生图，请配置 `OPENAI_API_KEY`，并按服务商实际情况修改 `OPENAI_BASE_URL` 和模型名称。
+
+## 输出目录
+
+每次运行都会创建 `outputs/<task_id>/`，其中包含：
+
+```text
+input.json             原始输入
+run_config.json        脱敏后的运行配置
+storyboard.json        五页分镜、提示词、解说词和时长
+images/page_01.png     五张画面
+audio/page_01.wav      五段配音
+segments/page_01.mp4   五段中间视频
+video.mp4              最终成片
+video_no_bgm.mp4       可选：未混背景音乐的中间成片
+subtitles.srt          字幕
+quality_report.json    页数、图片唯一性、音频时长和 MP4 检查
+manifest.json          任务状态、产物路径、服务提供方和费用估算
+task_status.json       当前任务进度状态
+pipeline.log           运行日志
+```
+
+不会将 API Key 写入任务目录或清单。
+
+## 配置
+
+配置项见 `.env.example`。常用配置如下：
+
+- `PIPELINE_MODE`：`auto`、`api` 或 `demo`
+- `OPENAI_API_KEY`、`OPENAI_BASE_URL`：兼容 OpenAI 接口的服务地址，可用硅基流动（SiliconFlow）
+- `PLANNER_MODEL`：内容规划模型
+- `PROMPT_ENHANCE`、`PROMPT_ENHANCE_MODEL`：生图前是否用大模型扩充画面提示词，以及用哪个模型
+- `IMAGE_MODEL`、`IMAGE_SIZE`：生图模型与尺寸
+- `IMAGE_TEXT`：画面内是否包含中文文字、图表或逻辑图
+- `IMAGE_BACKEND`：`demo`、`openai` 或 `comfyui`；图像生成后端可独立切换，默认 `demo`
+- `EDGE_TTS_VOICE`、`EDGE_TTS_RATE`：Edge TTS 的音色与语速
+- `COMFYUI_BASE_URL`、`COMFYUI_WORKFLOW_FILE`、`COMFYUI_OUTPUT_NODE_ID`：本地 ComfyUI 后端配置
+- `VIDEO_WIDTH`、`VIDEO_HEIGHT`、`FPS`
+- `PAGE_AUDIO_TAIL_SECONDS`：每页配音之后的留白
+- `BURN_SUBTITLES`、`SLIDE_TRANSITIONS`：是否把解说字幕烧录进画面、是否在幻灯片切换时加淡入淡出过渡
+- `AI_DISCLOSURE`：是否在画面右下角显示“AI 辅助生成画面”标识
+- `BACKGROUND_MUSIC`、`BACKGROUND_MUSIC_VOLUME`
+- `EST_*`：用户自行填写的费用估算参数
+
+## 字幕与画面动效
+
+- `BURN_SUBTITLES=true` 时，会把每页解说词烧录到画面底部（在标题栏上方），同时仍会生成独立的 `subtitles.srt`。
+- `SLIDE_TRANSITIONS=true` 时，每页开头淡入、结尾淡出，幻灯片切换更平滑；过渡落在配音后的静音尾巴里，不会截断解说。
+- 两项默认开启，想恢复原来的静态画面或纯外挂字幕，把它们设为 `false` 即可。
+
+## 使用硅基流动 SiliconFlow
+
+本项目默认配置为硅基流动：内容规划用 `deepseek-ai/DeepSeek-V4-Flash`，生图用 `Qwen/Qwen-Image`，配音用 Edge TTS。
+
+1. 打开 [SiliconFlow API 密钥页](https://cloud.siliconflow.cn/account/ak) 注册并创建 API Key。
+2. 把 Key 填入 `.env` 的 `OPENAI_API_KEY`。
+3. 生图模型会走 `POST https://api.siliconflow.cn/v1/images/generations`。想换模型，先执行下面的命令查看当前可用列表，再把模型 ID 填进 `IMAGE_MODEL`：
+
+```powershell
+$env:SF_KEY = "你的 API Key"
+Invoke-RestMethod -Uri "https://api.siliconflow.cn/v1/models?type=image" `
+  -Headers @{ Authorization = "Bearer $env:SF_KEY" }
+```
+
+4. 运行：
+
+```powershell
+.\run.ps1 "Transformer 模型如何理解一句话"
+```
+
+## 使用本地 ComfyUI
+
+需要在本地安装并启动 ComfyUI。完整步骤见 [COMFYUI_SETUP.md](COMFYUI_SETUP.md)，并可直接使用 [comfyui/sdxl_workflow_api.json](comfyui/sdxl_workflow_api.json) 作为工作流模板。
+
+## 生图提示词增强
+
+生图前会自动多跑一步提示词扩充：用大模型把每页简短的画面描述改写成具体的英文 image prompt（写清主体、动作、环境、构图、光线与风格），再交给生图模型。这样即使输入只是很短的抽象主题，画面也会更具体、更贴题。
+
+- `PROMPT_ENHANCE=true` 开启（默认），`false` 关闭。
+- `PROMPT_ENHANCE_MODEL` 留空时使用 `PLANNER_MODEL`。
+- 若扩充调用失败或没配置 API Key，会自动沿用原始提示词，不影响出片。
+
+## 测试
+
+```powershell
+$env:PYTHONPATH = (Join-Path (Get-Location) "src")
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+## 合规与限制
+
+- 画面右下角的“AI 辅助生成画面”标识由 `AI_DISCLOSURE` 控制，`.env` 默认关闭；如需合规展示可改为 `true`。
+- OpenAI 官方文档已标注 `gpt-4o-mini-tts` 将于 2027 年 1 月 6 日停用；正式长期部署前应将 TTS 适配器迁移到 Realtime API。
+- 使用第三方 API、字体、图片和背景音乐时，需要自行确认服务条款与素材授权。
+- 费用只按 `.env` 中的 `EST_*` 参数估算，不会自动联网查询实时价格。
+- 本项目不包含数字人、口型同步或人工剪辑拼接流程。
+
