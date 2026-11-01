@@ -210,9 +210,9 @@
 
 ## 2026-11-01｜单图讲解（配音 PPT）
 
-- 新增 `src/ai_video/lecture.py`：把一张产品图拆成 1 张全图 + 4 个 2×2 区域共 5 页，逐页渲染成 1920×1080 幻灯片（顶部标题栏 + 页码）。
-- 解说词：`demo` 模式用本地模板、图片不联网；`auto`/`api` 模式用视觉模型（`QC_MODEL`）给每页写中文标题和一句话解说，失败自动回退模板。
-- 新增 `VideoPipeline.run_image_lecture` / `run_image_lecture_in`，复用现有配音与合成链路（Edge TTS、字幕烧录、淡入淡出转场、质量自检）。
+- 新增 `src/ai_video/lecture.py` 的 `ImageStoryboardService`：用视觉模型（`QC_MODEL`）观察产品图，产出恰好 5 页分镜（中文标题、要点、英文画面提示词、中文解说词），五页风格统一，失败自动回退本地模板。
+- `VideoPipeline.run_image_lecture` 的流程改为：理解产品图 → 生成 5 页分镜 → 扩充画面提示词 → 用 `IMAGE_BACKEND` 生成 5 张 PPT 单页图 → Edge TTS 配音 → 合成 MP4，完整复用现有生图/质检/字幕/转场/质量自检链路。
+- 废弃原先的“整图 + 四宫格裁切”方案：不再裁图，而是根据图片内容重新生成 5 张风格一致的画面。
 - CLI 新增 `--image-lecture <图片>`；Web 新增 `POST /api/lecture`、产品图片列表/上传接口，新建页新增「单图讲解（配音 PPT）」卡片。
 - 依赖新增 `python-multipart`（网页上传产品图）。
-- 验证：`--image-lecture 产品知识库/1.png --mode demo` 端到端跑通，5 页全为 1920×1080，视频约 27 秒，manifest 状态 completed。
+- `demo` 模式不联网：本地分镜模板 + 本地演示画面；`auto`/`api` 模式会把产品图发送给视觉模型理解，再用生图后端生成 5 张图。

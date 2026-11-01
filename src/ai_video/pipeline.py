@@ -14,9 +14,9 @@ from PIL import Image
 
 from .config import Settings
 from .enhancer import PromptEnhancer
-from .lecture import ImageLectureService, build_slides_from_image
+from .lecture import ImageStoryboardService
 from .media import MediaService
-from .models import Storyboard, StoryboardPage
+from .models import Storyboard
 from .planner import PlanningService
 from .qc import ImageQcService
 from .tts import SpeechService
@@ -359,73 +359,56 @@ class VideoPipeline:
             )
             _write_json(task_dir / "run_config.json", _safe_config(self.settings))
 
-            self._step(2, "把产品图拆分为 5 页画面")
-            slides = build_slides_from_image(image_path, self.settings, task_dir)
-
-            self._step(3, "为每一页生成中文讲解词")
-            service = ImageLectureService(self.settings, logger)
-            entries = service.plan(slides)
-            manifest["providers"]["planner"] = (
-                f"api:{self.settings.qc_model}"
-                if self.settings.use_api()
-                else "template"
-            )
-
-            pages = []
-            for slide, entry in zip(slides, entries):
-                pages.append(
-                    StoryboardPage(
-                        index=slide.index,
-                        title=entry["title"],
-                        key_points=[entry["title"]],
-                        visual_prompt=entry["narration"],
-                        narration=entry["narration"],
-                        image_file=_relative(slide.slide_path, task_dir),
-                    )
-                )
-            storyboard = Storyboard(
-                topic=image_path.name,
-                style_guide="product image lecture",
-                pages=pages,
-                planner="image-lecture",
-            )
-            storyboard.validate()
+            self._step(2, "理解产品图并生成 5 页分镜")
+            service = ImageStoryboardService(self.settings, logger)
+            storyboard = service.plan(image_path)
+            manifest["providers"]["planner"] = storyboard.planner
             _write_json(task_dir / "storyboard.json", storyboard.to_dict())
 
-            self._step(4, "逐页生成中文人声配音")
+            self._step(3, "扩充画面提示词，提升生图贴题度")
+            self._enhance_prompts(storyboard, task_dir, manifest, logger)
+
+            self._step(4, "生成 5 张风格一致的 PPT 单页画面")
+            self._generate_images(storyboard, task_dir, manifest, logger, task_id)
+
+            self._step(5, "逐页生成中文人声配音")
             self._synthesize_speech(storyboard, task_dir, manifest, logger)
 
             video_path = self._compose_video(storyboard, task_dir, logger)
 
             self._step(10, "写入清单、费用估算与最终状态")
             character_count = sum(len(page.narration) for page in storyboard.pages)
-            vision_calls = len(storyboard.pages) if self.settings.use_api() else 0
+            usage = self._usage
             estimated_cost = {
                 "currency": "CNY",
                 "kind": "user_supplied_estimate",
                 "planner_calls": 1,
-                "images": 0,
-                "qc_calls": 0,
-                "redraws": 0,
-                "vision_calls": vision_calls,
+                "images": usage["image_generations"],
+                "qc_calls": usage["qc_calls"],
+                "redraws": usage["redraws"],
                 "tts_characters": character_count,
-                "planner": 0.0,
-                "image": 0.0,
-                "tts": round(
-                    self.settings.est_tts_cny_per_1k_chars * character_count / 1000,
+                "planner": round(self.settings.est_planner_cny_per_call, 4),
+                "image": round(
+                    self.settings.est_image_cny_per_image
+                    * usage["image_generations"],
                     4,
                 ),
-                "qc": 0.0,
-                "vision": round(
-                    self.settings.est_qc_cny_per_call * vision_calls, 4
+                "tts": round(
+                    self.settings.est_tts_cny_per_1k_chars
+                    * character_count
+                    / 1000,
+                    4,
+                ),
+                "qc": round(
+                    self.settings.est_qc_cny_per_call * usage["qc_calls"],
+                    4,
                 ),
             }
             estimated_cost["total"] = round(
                 estimated_cost["planner"]
                 + estimated_cost["image"]
                 + estimated_cost["tts"]
-                + estimated_cost["qc"]
-                + estimated_cost["vision"],
+                + estimated_cost["qc"],
                 4,
             )
             finished = datetime.now().astimezone()

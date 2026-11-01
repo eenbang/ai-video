@@ -1,4 +1,4 @@
-"""单图讲解：把一张产品图拆成 5 页，逐页生成中文解说词与配音画面。"""
+"""单图讲解：根据一张产品图的内容，生成 5 页风格一致的分镜与解说词。"""
 
 from __future__ import annotations
 
@@ -7,126 +7,163 @@ import io
 import json
 import logging
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image
 
 from .config import Settings
 from .http_client import post_json
+from .models import Storyboard, StoryboardPage
+from .planner import PLAN_SCHEMA
 
 
-@dataclass(slots=True)
-class LectureSlide:
-    index: int
-    default_title: str
-    content: Image.Image
-    slide_path: Path
-
-
-def build_slides_from_image(
-    image_path: Path,
-    settings: Settings,
-    task_dir: Path,
-) -> list[LectureSlide]:
-    """把整张图拆成 1 张全图 + 4 个 2x2 区域，渲染为 5 张 16:9 幻灯片。"""
-    image = Image.open(image_path).convert("RGB")
-    width, height = image.size
-    half_w = max(1, width // 2)
-    half_h = max(1, height // 2)
-    regions: list[tuple[int, str, tuple[int, int, int, int]]] = [
-        (1, "整体概览", (0, 0, width, height)),
-        (2, "左上区域", (0, 0, half_w, half_h)),
-        (3, "右上区域", (half_w, 0, width, half_h)),
-        (4, "左下区域", (0, half_h, half_w, height)),
-        (5, "右下区域", (half_w, half_h, width, height)),
-    ]
-    images_dir = task_dir / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-    slides: list[LectureSlide] = []
-    for index, default_title, box in regions:
-        content = image.crop(box)
-        slide_path = images_dir / f"page_{index:02d}.png"
-        _render_lecture_slide(content, default_title, index, settings, slide_path)
-        slides.append(LectureSlide(index, default_title, content, slide_path))
-    return slides
-
-
-class ImageLectureService:
-    """为每一页画面生成中文标题与解说词；无 API 时使用模板。"""
+class ImageStoryboardService:
+    """用视觉模型理解产品图，产出恰好 5 页的分镜（标题/要点/画面提示词/解说词）。"""
 
     def __init__(self, settings: Settings, logger: logging.Logger) -> None:
         self.settings = settings
         self.logger = logger
 
-    def plan(self, slides: list[LectureSlide]) -> list[dict[str, str]]:
-        results: list[dict[str, str]] = []
-        for slide in slides:
-            results.append(self._describe(slide))
-        return results
+    def plan(self, image_path: Path) -> Storyboard:
+        image_path = image_path.resolve()
+        if not image_path.is_file():
+            raise ValueError(f"产品图片不存在：{image_path}")
+        if self.settings.use_api():
+            try:
+                return self._remote_plan(image_path)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("根据产品图规划失败，使用本地模板：%s", exc)
+                if self.settings.mode == "api":
+                    raise
+        return self._local_plan(image_path)
 
-    def _describe(self, slide: LectureSlide) -> dict[str, str]:
-        fallback_narration = _fallback_narration(slide.index)
-        if not self.settings.use_api():
-            return {"title": slide.default_title, "narration": fallback_narration}
-        try:
-            result = _call_vision(
-                self.settings, self.logger, _pil_data_uri(slide.content)
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.logger.warning("第 %d 页画面解说失败，使用模板：%s", slide.index, exc)
-            return {"title": slide.default_title, "narration": fallback_narration}
-        title = str(result.get("title", "")).strip()
-        narration = str(result.get("narration", "")).strip()
-        title = title[:14] if title else slide.default_title
-        narration = narration[:120] if narration else fallback_narration
-        return {"title": title, "narration": narration}
-
-
-def _call_vision(
-    settings: Settings,
-    logger: logging.Logger,
-    data_uri: str,
-) -> dict[str, Any]:
-    system = (
-        "你是产品图讲解员。给这张画面写一句中文解说（25～50 字）作为配音旁白，"
-        "再给一个不超过 8 字的中文标题。只输出 JSON，不要输出 Markdown。"
-    )
-    user = '请输出 JSON：{"title":"标题","narration":"一句话解说"}'
-    payload: dict[str, Any] = {
-        "model": settings.qc_model,
-        "messages": [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user},
-                    {"type": "image_url", "image_url": {"url": data_uri}},
-                ],
-            },
-        ],
-        "temperature": 0.4,
-    }
-    if settings.is_siliconflow:
-        payload["response_format"] = {"type": "json_object"}
-    result = post_json(
-        f"{settings.base_url}/chat/completions",
-        payload,
-        api_key=settings.api_key,
-        timeout=settings.request_timeout_seconds,
-        retries=settings.max_retries,
-        logger=logger,
-    )
-    content = result["choices"][0]["message"]["content"]
-    if isinstance(content, list):
-        content = "".join(
-            item.get("text", "") for item in content if isinstance(item, dict)
+    def _remote_plan(self, image_path: Path) -> Storyboard:
+        data_uri = _image_data_uri(image_path)
+        system = (
+            "你是中文讲解短视频的分镜策划。先仔细观察用户提供的产品图，提炼图中的产品名称、"
+            "卖点、参数、结构或使用场景，然后严格拆成恰好 5 页。信息必须忠于图片，不编造图中没有的事实；"
+            "五页要有清晰的起承转合。每页给出短标题、2-3 个要点、画面描述和 30-100 字自然口播。"
+            "标题、要点和口播用中文；visual_prompt 与 style_guide 必须用英文。"
+            "五页画面要风格统一：同一配色、同一排版、干净的 PPT 单页风格，"
+            "画面内可包含少量中文文字（短标题、关键词标签、图表标注或简单逻辑图）。"
         )
-    value = _parse_json(str(content))
-    if not isinstance(value, dict):
-        raise ValueError("解说返回的不是 JSON 对象")
-    return value
+        user = (
+            "请根据这张产品图制作 5 页中文图文讲解分镜。"
+            "只输出一个 JSON 对象，不要输出任何其他文字、注释或 Markdown 代码块。"
+            "JSON 顶层只能包含 style_guide 和 pages 两个键，"
+            "不要重复输出 schema 本身（不要出现 type、properties、required 等字段）。"
+            "pages 恰好 5 项，每项包含 index、title、key_points、visual_prompt、narration。"
+        )
+        payload: dict[str, Any] = {
+            "model": self.settings.qc_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                },
+            ],
+            "temperature": 0.5,
+        }
+        if self.settings.is_siliconflow:
+            payload["response_format"] = {"type": "json_object"}
+            payload["messages"][1]["content"][0]["text"] += (
+                "\n\n结构要求如下：\n"
+                + json.dumps(PLAN_SCHEMA, ensure_ascii=False)
+            )
+        else:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "five_page_storyboard",
+                    "strict": True,
+                    "schema": PLAN_SCHEMA,
+                },
+            }
+        result = post_json(
+            f"{self.settings.base_url}/chat/completions",
+            payload,
+            api_key=self.settings.api_key,
+            timeout=self.settings.request_timeout_seconds,
+            retries=self.settings.max_retries,
+            logger=self.logger,
+        )
+        content = result["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "") for item in content if isinstance(item, dict)
+            )
+        raw = _parse_json(str(content))
+        storyboard = Storyboard.from_dict(
+            {
+                "topic": image_path.stem,
+                "style_guide": str(raw.get("style_guide", "")).strip(),
+                "pages": raw.get("pages", []),
+                "planner": f"api:{self.settings.qc_model}",
+            }
+        )
+        storyboard.validate()
+        self.logger.info("根据产品图规划完成，模型=%s", self.settings.qc_model)
+        return storyboard
+
+    def _local_plan(self, image_path: Path) -> Storyboard:
+        topic = image_path.stem
+        style_guide = (
+            "Clean modern business presentation slide; consistent deep-blue and white "
+            "palette with a single amber accent; title at top, short Chinese bullet "
+            "points, flat vector icons and a simple diagram; generous margins; 16:9; "
+            "no logos or watermarks."
+        )
+        titles = ["产品概览", "核心卖点", "细节与参数", "使用场景", "总结与建议"]
+        points = [
+            ["整体外观", "产品定位"],
+            ["主要功能", "突出优势"],
+            ["关键参数", "细节设计"],
+            ["适用人群", "典型场景"],
+            ["回顾要点", "行动建议"],
+        ]
+        scenes = [
+            "a clean product overview slide with the product image centered and a short Chinese title on top",
+            "a clean slide with three bullet points and flat icons highlighting key selling points",
+            "a clean slide with a simple annotated diagram of the product structure and key specs",
+            "a clean slide showing the product in a real usage scenario with two short labels",
+            "a clean summary slide with five key takeaways arranged in a row",
+        ]
+        pages: list[StoryboardPage] = []
+        for index in range(5):
+            pages.append(
+                StoryboardPage(
+                    index=index + 1,
+                    title=titles[index],
+                    key_points=points[index],
+                    visual_prompt=(
+                        f"{style_guide} Slide {index + 1}: {scenes[index]}. "
+                        "Include a short Chinese title and a few Chinese labels if helpful."
+                    ),
+                    narration=_template_narration(index, topic),
+                )
+            )
+        storyboard = Storyboard(
+            topic=topic,
+            style_guide=style_guide,
+            pages=pages,
+            planner="image-template",
+        )
+        storyboard.validate()
+        self.logger.info("无 API 时使用图片分镜模板")
+        return storyboard
+
+
+def _image_data_uri(image_path: Path) -> str:
+    with Image.open(image_path) as image:
+        buffer = io.BytesIO()
+        image.convert("RGB").save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def _parse_json(content: str) -> dict[str, Any]:
@@ -138,94 +175,12 @@ def _parse_json(content: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _pil_data_uri(image: Image.Image) -> str:
-    buffer = io.BytesIO()
-    image.convert("RGB").save(buffer, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
-
-
-def _fallback_narration(index: int) -> str:
-    texts = {
-        1: "先看这张产品图的整体画面，建立完整印象。",
-        2: "这是画面的左上部分，留意其中的产品信息与细节。",
-        3: "这是画面的右上部分，注意这里展示的关键信息。",
-        4: "这是画面的左下部分，聚焦这一区域的细节内容。",
-        5: "这是画面的右下部分，结合整体来理解这一块内容。",
-    }
-    return texts.get(index, "这是产品图的一个局部画面。")
-
-
-def _render_lecture_slide(
-    content: Image.Image,
-    title: str,
-    index: int,
-    settings: Settings,
-    destination: Path,
-) -> None:
-    width, height = settings.width, settings.height
-    canvas = Image.new("RGB", (width, height), (9, 14, 28))
-    draw = ImageDraw.Draw(canvas, "RGBA")
-    margin_x = int(width * 0.04)
-    top_band = int(height * 0.15)
-    bottom_margin = int(height * 0.04)
-    available_w = width - margin_x * 2
-    available_h = height - top_band - bottom_margin
-    fitted = ImageOps.contain(
-        content, (available_w, available_h), Image.Resampling.LANCZOS
-    )
-    x = (width - fitted.width) // 2
-    y = top_band + (available_h - fitted.height) // 2
-    canvas.paste(fitted, (x, y))
-    draw.rounded_rectangle(
-        (margin_x, int(height * 0.025), width - margin_x, top_band - int(height * 0.018)),
-        radius=14,
-        fill=(5, 10, 24, 195),
-        outline=(255, 255, 255, 22),
-        width=2,
-    )
-    title_font = _font(int(height * 0.038), bold=True)
-    meta_font = _font(int(height * 0.022))
-    draw.text(
-        (int(width * 0.06), int(height * 0.05)),
-        title,
-        font=title_font,
-        fill=(245, 247, 250, 255),
-    )
-    draw.text(
-        (width - int(width * 0.06), int(height * 0.058)),
-        f"{index:02d} / 05",
-        font=meta_font,
-        fill=(237, 185, 92, 255),
-        anchor="ra",
-    )
-    canvas.save(destination, format="PNG", optimize=True)
-
-
-def _font(
-    size: int, bold: bool = False
-) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    paths: list[Path] = []
-    if bold:
-        paths.extend(
-            [
-                Path("C:/Windows/Fonts/msyhbd.ttc"),
-                Path("C:/Windows/Fonts/simhei.ttf"),
-                Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
-                Path("/System/Library/Fonts/PingFang.ttc"),
-            ]
-        )
-    paths.extend(
-        [
-            Path("C:/Windows/Fonts/msyh.ttc"),
-            Path("C:/Windows/Fonts/simsun.ttc"),
-            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-            Path("/System/Library/Fonts/PingFang.ttc"),
-        ]
-    )
-    for path in paths:
-        if path.is_file():
-            try:
-                return ImageFont.truetype(str(path), size=size)
-            except OSError:
-                continue
-    return ImageFont.load_default(size=size)
+def _template_narration(index: int, topic: str) -> str:
+    texts = [
+        f"这期用五个画面介绍“{topic}”。先看整体概览，再逐步了解它的卖点、参数和使用场景。",
+        f"“{topic}”的核心卖点，重点看它的主要功能和突出优势。",
+        f"再看“{topic}”的细节与关键参数，这部分决定了它的实际表现。",
+        f"把“{topic}”放进真实使用场景里，看它适合哪些人群和场合。",
+        f"最后回顾五个要点，并给出下一步建议。",
+    ]
+    return texts[index]
