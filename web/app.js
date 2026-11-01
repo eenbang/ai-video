@@ -755,7 +755,7 @@ const SETTING_GROUPS = [
     fields: [
       { key: "PROMPT_ENHANCE", label: "生图前扩充提示词", type: "bool", hint: "用大模型把画面描述扩写得更具体。" },
       { key: "IMAGE_TEXT", label: "允许图片内出现文字/图表", type: "bool", hint: "本地 SDXL 中文易乱码时可关闭。" },
-      { key: "QC_ENABLED", label: "生图后自动质检重画", type: "bool", hint: "仅云端生图（openai 后端）生效。" },
+      { key: "QC_ENABLED", label: "生图后自动质检重画", type: "bool", hint: "openai 与 comfyui 后端生效，demo 占位图不质检。" },
       { key: "QC_MODEL", label: "质检视觉模型", type: "text", hint: "需支持图片输入，如 Qwen/Qwen3-VL-8B-Instruct。" },
       { key: "QC_MIN_SCORE", label: "质检通过分数（0-10）", type: "text", hint: "低于该分数会重画。" },
       { key: "QC_MAX_REDRAWS", label: "每页最多重画次数", type: "text", hint: "控制质检重画成本上限。" },

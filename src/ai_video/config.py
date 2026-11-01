@@ -17,8 +17,18 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
+        value = _strip_inline_comment(value)
         if key:
             os.environ.setdefault(key, value)
+
+
+def _strip_inline_comment(value: str) -> str:
+    """去掉 .env 值后面的行内注释（空格后跟 #）。"""
+    for marker in (" #", "\t#"):
+        if marker in value:
+            value = value.split(marker, 1)[0]
+            break
+    return value.strip()
 
 
 def _bool(name: str, default: bool) -> bool:

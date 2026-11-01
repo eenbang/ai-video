@@ -11,7 +11,6 @@ import collections
 import importlib.util
 import json
 import os
-import queue
 import re
 import shutil
 import threading
@@ -89,7 +88,8 @@ class Job:
         self.task_dir = task_dir
         self.status = "queued"
         self.error: str | None = None
-        self.events: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.events: list[dict[str, Any]] = []
+        self._events_lock = threading.Lock()
         self.cancel_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.video_path: str | None = None
@@ -103,7 +103,8 @@ class Job:
         self.redo_audio: bool = True
 
     def emit(self, event_type: str, **data: Any) -> None:
-        self.events.put({"type": event_type, **data})
+        with self._events_lock:
+            self.events.append({"type": event_type, **data})
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -649,29 +650,30 @@ async def task_events(task_id: str, request: Request) -> StreamingResponse:
             summary = _task_summary(task_dir) if task_dir else {}
             yield _sse({"type": "done", "status": summary.get("status", "unknown"), "task_id": task_id})
             return
+        cursor = 0
         while True:
-            try:
-                item = job.events.get_nowait()
-            except queue.Empty:
-                if job.status in {"completed", "failed", "cancelled"}:
-                    yield _sse(
-                        {
-                            "type": "done",
-                            "status": job.status,
-                            "task_id": task_id,
-                        }
-                    )
-                    break
-                try:
-                    if await request.is_disconnected():
-                        return
-                except Exception:  # noqa: BLE001
-                    pass
-                await asyncio.sleep(0.25)
-                continue
-            yield _sse(item)
-            if item.get("type") == "done":
+            with job._events_lock:
+                pending = job.events[cursor:]
+                cursor = len(job.events)
+            for item in pending:
+                yield _sse(item)
+                if item.get("type") == "done":
+                    return
+            if job.status in {"completed", "failed", "cancelled"}:
+                yield _sse(
+                    {
+                        "type": "done",
+                        "status": job.status,
+                        "task_id": task_id,
+                    }
+                )
                 return
+            try:
+                if await request.is_disconnected():
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(0.25)
 
     return StreamingResponse(
         stream(),

@@ -345,8 +345,8 @@ class VideoPipeline:
         visuals = VisualService(self.settings, logger, task_id)
         qc_active = (
             self.settings.qc_enabled
-            and self.settings.image_backend == "openai"
             and self.settings.can_use_api
+            and self.settings.image_backend in {"openai", "comfyui"}
         )
         qc = ImageQcService(self.settings, logger) if qc_active else None
         image_providers: list[str] = []

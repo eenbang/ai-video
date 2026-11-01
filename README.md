@@ -251,7 +251,7 @@ Invoke-RestMethod -Uri "https://api.siliconflow.cn/v1/models?type=image" `
 - `QC_MIN_SCORE` 通过分数线，默认 6.0。
 - `QC_MAX_REDRAWS` 每页最多重画次数，默认 2。
 
-质检只在 `IMAGE_BACKEND=openai` 且已配置 API Key 时生效；demo 或 ComfyUI 后端不质检。质检调用失败不会中断出片，会保留原图并记一条日志。
+质检在 `IMAGE_BACKEND=openai` 或 `comfyui` 且已配置 API Key 时生效；demo 占位画面不质检。质检调用失败不会中断出片，会保留原图并记一条日志。
 
 ## 编辑分镜与单页重做
 
