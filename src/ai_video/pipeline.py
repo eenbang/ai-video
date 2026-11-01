@@ -14,8 +14,9 @@ from PIL import Image
 
 from .config import Settings
 from .enhancer import PromptEnhancer
+from .lecture import ImageLectureService, build_slides_from_image
 from .media import MediaService
-from .models import Storyboard
+from .models import Storyboard, StoryboardPage
 from .planner import PlanningService
 from .qc import ImageQcService
 from .tts import SpeechService
@@ -45,7 +46,11 @@ class VideoPipeline:
         self.progress = progress or (lambda step, total, message: None)
         self._usage = {"image_generations": 0, "qc_calls": 0, "redraws": 0}
 
-    def run(self, source_text: str) -> PipelineResult:
+    def run(
+        self,
+        source_text: str,
+        product_image: Path | None = None,
+    ) -> PipelineResult:
         source_text = source_text.strip()
         if not source_text:
             raise ValueError("主题或文案不能为空")
@@ -54,20 +59,25 @@ class VideoPipeline:
         task_id = _make_task_id(created_at, source_text)
         task_dir = self.settings.output_dir / task_id
         task_dir.mkdir(parents=True, exist_ok=False)
-        return self._execute(source_text, task_dir, task_id, resume=False)
+        return self._execute(
+            source_text, task_dir, task_id, resume=False, product_image=product_image
+        )
 
     def run_in(
         self,
         source_text: str,
         task_dir: Path,
         task_id: str,
+        product_image: Path | None = None,
     ) -> PipelineResult:
         """在指定的任务目录中运行完整流程，供 Web 端预先分配任务 ID。"""
         source_text = source_text.strip()
         if not source_text:
             raise ValueError("主题或文案不能为空")
         task_dir.mkdir(parents=True, exist_ok=False)
-        return self._execute(source_text, task_dir, task_id, resume=False)
+        return self._execute(
+            source_text, task_dir, task_id, resume=False, product_image=product_image
+        )
 
     def resume(self, task_dir: Path) -> PipelineResult:
         task_dir = task_dir.resolve()
@@ -86,7 +96,33 @@ class VideoPipeline:
         source_text = str(input_data.get("source_text", "")).strip()
         if not source_text:
             raise ValueError("任务缺少原始输入，无法续跑")
-        return self._execute(source_text, task_dir, task_id, resume=True)
+        product_image = _resolve_product_image(input_data.get("product_image"))
+        return self._execute(
+            source_text, task_dir, task_id, resume=True, product_image=product_image
+        )
+
+    def run_image_lecture(self, image_path: Path) -> PipelineResult:
+        """把一张产品图拆成 5 页，逐页配音讲解，合成类似 PPT 的展示视频。"""
+        image_path = image_path.expanduser().resolve()
+        if not image_path.is_file():
+            raise ValueError(f"产品图片不存在：{image_path}")
+        created_at = datetime.now().astimezone()
+        task_id = _make_task_id(created_at, f"image:{image_path.stem}")
+        task_dir = self.settings.output_dir / task_id
+        return self.run_image_lecture_in(image_path, task_dir, task_id)
+
+    def run_image_lecture_in(
+        self,
+        image_path: Path,
+        task_dir: Path,
+        task_id: str,
+    ) -> PipelineResult:
+        """在指定任务目录中运行单图讲解，供 Web 端预先分配任务 ID。"""
+        image_path = image_path.expanduser().resolve()
+        if not image_path.is_file():
+            raise ValueError(f"产品图片不存在：{image_path}")
+        task_dir.mkdir(parents=True, exist_ok=False)
+        return self._execute_image_lecture(image_path, task_dir, task_id)
 
     def _execute(
         self,
@@ -94,6 +130,7 @@ class VideoPipeline:
         task_dir: Path,
         task_id: str,
         resume: bool,
+        product_image: Path | None = None,
     ) -> PipelineResult:
         logger = _task_logger(task_dir, task_id)
         self._usage = {"image_generations": 0, "qc_calls": 0, "redraws": 0}
@@ -111,6 +148,7 @@ class VideoPipeline:
                 "status": "running",
                 "created_at": started.isoformat(),
                 "source_text": source_text,
+                "product_image": str(product_image) if product_image else None,
                 "mode_requested": self.settings.mode,
                 "providers": {},
                 "artifacts": {},
@@ -127,6 +165,9 @@ class VideoPipeline:
                     {
                         "task_id": task_id,
                         "source_text": source_text,
+                        "product_image": (
+                            str(product_image) if product_image else None
+                        ),
                         "created_at": manifest.get(
                             "created_at", started.isoformat()
                         ),
@@ -160,6 +201,7 @@ class VideoPipeline:
                 manifest,
                 logger,
                 task_id,
+                product_image,
             )
 
             self._step(5, "逐页生成中文人声配音")
@@ -278,6 +320,174 @@ class VideoPipeline:
                 handler.close()
                 logger.removeHandler(handler)
 
+    def _execute_image_lecture(
+        self,
+        image_path: Path,
+        task_dir: Path,
+        task_id: str,
+    ) -> PipelineResult:
+        logger = _task_logger(task_dir, task_id)
+        self._usage = {"image_generations": 0, "qc_calls": 0, "redraws": 0}
+        manifest_path = task_dir / "manifest.json"
+        status_path = task_dir / "task_status.json"
+        started = datetime.now().astimezone()
+        manifest = {
+            "task_id": task_id,
+            "status": "running",
+            "created_at": started.isoformat(),
+            "source_text": image_path.name,
+            "product_image": str(image_path),
+            "kind": "image_lecture",
+            "mode_requested": self.settings.mode,
+            "providers": {},
+            "artifacts": {},
+            "cost_estimate": {},
+            "error": None,
+        }
+        _write_json(manifest_path, manifest)
+        try:
+            self._step(1, "保存输入与运行配置")
+            _write_json(
+                task_dir / "input.json",
+                {
+                    "task_id": task_id,
+                    "source_text": image_path.name,
+                    "product_image": str(image_path),
+                    "kind": "image_lecture",
+                    "created_at": manifest["created_at"],
+                },
+            )
+            _write_json(task_dir / "run_config.json", _safe_config(self.settings))
+
+            self._step(2, "把产品图拆分为 5 页画面")
+            slides = build_slides_from_image(image_path, self.settings, task_dir)
+
+            self._step(3, "为每一页生成中文讲解词")
+            service = ImageLectureService(self.settings, logger)
+            entries = service.plan(slides)
+            manifest["providers"]["planner"] = (
+                f"api:{self.settings.qc_model}"
+                if self.settings.use_api()
+                else "template"
+            )
+
+            pages = []
+            for slide, entry in zip(slides, entries):
+                pages.append(
+                    StoryboardPage(
+                        index=slide.index,
+                        title=entry["title"],
+                        key_points=[entry["title"]],
+                        visual_prompt=entry["narration"],
+                        narration=entry["narration"],
+                        image_file=_relative(slide.slide_path, task_dir),
+                    )
+                )
+            storyboard = Storyboard(
+                topic=image_path.name,
+                style_guide="product image lecture",
+                pages=pages,
+                planner="image-lecture",
+            )
+            storyboard.validate()
+            _write_json(task_dir / "storyboard.json", storyboard.to_dict())
+
+            self._step(4, "逐页生成中文人声配音")
+            self._synthesize_speech(storyboard, task_dir, manifest, logger)
+
+            video_path = self._compose_video(storyboard, task_dir, logger)
+
+            self._step(10, "写入清单、费用估算与最终状态")
+            character_count = sum(len(page.narration) for page in storyboard.pages)
+            vision_calls = len(storyboard.pages) if self.settings.use_api() else 0
+            estimated_cost = {
+                "currency": "CNY",
+                "kind": "user_supplied_estimate",
+                "planner_calls": 1,
+                "images": 0,
+                "qc_calls": 0,
+                "redraws": 0,
+                "vision_calls": vision_calls,
+                "tts_characters": character_count,
+                "planner": 0.0,
+                "image": 0.0,
+                "tts": round(
+                    self.settings.est_tts_cny_per_1k_chars * character_count / 1000,
+                    4,
+                ),
+                "qc": 0.0,
+                "vision": round(
+                    self.settings.est_qc_cny_per_call * vision_calls, 4
+                ),
+            }
+            estimated_cost["total"] = round(
+                estimated_cost["planner"]
+                + estimated_cost["image"]
+                + estimated_cost["tts"]
+                + estimated_cost["qc"]
+                + estimated_cost["vision"],
+                4,
+            )
+            finished = datetime.now().astimezone()
+            manifest.update(
+                {
+                    "status": "completed",
+                    "finished_at": finished.isoformat(),
+                    "elapsed_seconds": round((finished - started).total_seconds(), 2),
+                    "page_count": len(storyboard.pages),
+                    "total_duration_seconds": round(
+                        sum(page.display_duration_seconds for page in storyboard.pages),
+                        3,
+                    ),
+                    "cost_estimate": estimated_cost,
+                    "artifacts": {
+                        "video": "video.mp4",
+                        "subtitles": "subtitles.srt",
+                        "storyboard": "storyboard.json",
+                        "quality_report": "quality_report.json",
+                        "images": [page.image_file for page in storyboard.pages],
+                        "audio": [page.audio_file for page in storyboard.pages],
+                        "segments": [page.segment_file for page in storyboard.pages],
+                        "log": "pipeline.log",
+                    },
+                }
+            )
+            _write_json(manifest_path, manifest)
+            _write_json(
+                status_path,
+                {
+                    "task_id": task_id,
+                    "status": "completed",
+                    "step": self.total_steps,
+                    "total_steps": self.total_steps,
+                    "message": "完成",
+                    "updated_at": finished.isoformat(),
+                },
+            )
+            logger.info("单图讲解完成 video=%s", video_path)
+            return PipelineResult(task_id, task_dir, video_path, manifest_path)
+        except Exception as exc:  # noqa: BLE001
+            failed_at = datetime.now().astimezone()
+            manifest["status"] = "failed"
+            manifest["finished_at"] = failed_at.isoformat()
+            manifest["error"] = {"type": type(exc).__name__, "message": str(exc)}
+            _write_json(manifest_path, manifest)
+            _write_json(
+                status_path,
+                {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "message": str(exc),
+                    "updated_at": failed_at.isoformat(),
+                },
+            )
+            logger.exception("单图讲解任务失败")
+            raise
+        finally:
+            for handler in list(logger.handlers):
+                handler.close()
+                logger.removeHandler(handler)
+
     def _plan_text(
         self,
         source_text: str,
@@ -340,6 +550,7 @@ class VideoPipeline:
         manifest: dict[str, Any],
         logger: logging.Logger,
         task_id: str,
+        product_image: Path | None = None,
     ) -> None:
         """阶段二：生图，按分镜逐页生成五张画面。"""
         visuals = VisualService(self.settings, logger, task_id)
@@ -353,9 +564,21 @@ class VideoPipeline:
         qc_entries: list[dict[str, Any]] = []
         for page in storyboard.pages:
             image_path = task_dir / "images" / f"page_{page.index:02d}.png"
+            is_product_page = (
+                product_image is not None
+                and page.index == 1
+                and product_image.is_file()
+            )
             if _usable_image(image_path):
                 logger.info("第 %d 页画面已存在，跳过", page.index)
                 provider = "cached"
+            elif is_product_page:
+                provider = _import_product_image(
+                    product_image, image_path, self.settings
+                )
+                logger.info(
+                    "第 %d 页使用产品图片：%s", page.index, product_image
+                )
             else:
                 provider = visuals.generate(
                     page,
@@ -825,6 +1048,37 @@ def _usable_audio(path: Path, media: MediaService) -> bool:
 
 def _relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def _resolve_product_image(value: Any) -> Path | None:
+    if not value:
+        return None
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path if path.is_file() else None
+
+
+def _import_product_image(
+    source: Path,
+    destination: Path,
+    settings: Settings,
+) -> str:
+    """把用户提供的产品图片规范成 16:9 画布并居中放置，作为指定页画面。"""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.open(source).convert("RGB")
+    width, height = settings.width, settings.height
+    margin = int(min(width, height) * 0.04)
+    available_w = max(1, width - margin * 2)
+    available_h = max(1, height - margin * 2)
+    ratio = min(available_w / image.width, available_h / image.height)
+    target_w = max(1, round(image.width * ratio))
+    target_h = max(1, round(image.height * ratio))
+    resized = image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (width, height), (7, 11, 23))
+    canvas.paste(resized, ((width - target_w) // 2, (height - target_h) // 2))
+    canvas.save(destination, format="PNG", optimize=True)
+    return f"product-image:{source.name}"
 
 
 def _write_json(path: Path, value: Any) -> None:

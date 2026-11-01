@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Path as PathParam, Request
+from fastapi import FastAPI, File, HTTPException, Path as PathParam, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -30,6 +30,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = PROJECT_ROOT / "web"
 ENV_PATH = PROJECT_ROOT / ".env"
 OUTPUT_DIR_DEFAULT = PROJECT_ROOT / "outputs"
+PRODUCT_KB_DIR = PROJECT_ROOT / "产品知识库"
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 TASK_ID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
 
 # 将进程工作目录固定到项目根目录，避免从其他目录启动服务时找不到 outputs/.env。
@@ -95,6 +97,8 @@ class Job:
         self.video_path: str | None = None
         self.manifest_path: str | None = None
         self.source_text: str | None = None
+        self.product_image: Path | None = None
+        self.image_path: Path | None = None
         self.settings: Settings | None = None
         self.resume: bool = False
         self.kind: str = "run"
@@ -188,12 +192,14 @@ class TaskManager:
         self,
         source_text: str,
         settings: Settings,
+        product_image: Path | None = None,
     ) -> Job:
         created_at = datetime.now().astimezone()
         task_id = _make_task_id(created_at, source_text)
         task_dir = settings.output_dir / task_id
         job = Job(task_id, task_dir)
         job.source_text = source_text
+        job.product_image = product_image
         job.settings = settings
         job.resume = False
         job.kind = "run"
@@ -222,6 +228,29 @@ class TaskManager:
         job.settings = settings
         job.resume = True
         job.kind = "resume"
+        job.emit(
+            "status",
+            status="queued",
+            step=0,
+            total=VideoPipeline.total_steps,
+            message="排队中",
+        )
+        with self._lock:
+            self._jobs[task_id] = job
+        with self._cv:
+            self._pending.append(job)
+            self._cv.notify()
+        return job
+
+    def start_lecture(self, image_path: Path, settings: Settings) -> Job:
+        created_at = datetime.now().astimezone()
+        task_id = _make_task_id(created_at, f"image:{image_path.stem}")
+        task_dir = settings.output_dir / task_id
+        job = Job(task_id, task_dir)
+        job.source_text = image_path.name
+        job.image_path = image_path
+        job.settings = settings
+        job.kind = "lecture"
         job.emit(
             "status",
             status="queued",
@@ -360,8 +389,14 @@ class TaskManager:
                     job.redraw_image,
                     job.redo_audio,
                 )
+            elif job.kind == "lecture":
+                result = pipeline.run_image_lecture_in(
+                    job.image_path, task_dir, task_id
+                )
             else:
-                result = pipeline.run_in(source_text, task_dir, task_id)
+                result = pipeline.run_in(
+                    source_text, task_dir, task_id, product_image=job.product_image
+                )
             job.status = "completed"
             job.video_path = str(result.video_path)
             job.manifest_path = str(result.manifest_path)
@@ -490,6 +525,21 @@ def _safe_child(task_dir: Path, rel_path: str) -> Path:
     if not child.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
     return child
+
+
+def _resolve_product_image(value: Any) -> Path | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        return path if path.is_file() else None
+    for candidate in (PROJECT_ROOT / path, PRODUCT_KB_DIR / path):
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
 
 
 def _run_checks(settings: Settings) -> list[dict[str, Any]]:
@@ -698,7 +748,18 @@ def create_task(body: dict[str, Any]) -> dict[str, Any]:
     mode = body.get("mode") or None
     image_backend = body.get("image_backend") or None
     settings = Settings.load(mode, None, image_backend)
-    job = MANAGER.start_run(source_text, settings)
+    product_image = _resolve_product_image(body.get("product_image"))
+    job = MANAGER.start_run(source_text, settings, product_image)
+    return {"task_id": job.task_id, "status": job.status}
+
+
+@app.post("/api/lecture")
+def create_lecture(body: dict[str, Any]) -> dict[str, Any]:
+    image = _resolve_product_image(body.get("image"))
+    if image is None:
+        raise HTTPException(status_code=400, detail="产品图片不存在")
+    settings = Settings.load()
+    job = MANAGER.start_lecture(image, settings)
     return {"task_id": job.task_id, "status": job.status}
 
 
@@ -848,6 +909,30 @@ def update_settings(body: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "project_root": str(PROJECT_ROOT)}
+
+
+@app.get("/api/product-images")
+def list_product_images() -> dict[str, Any]:
+    images: list[str] = []
+    if PRODUCT_KB_DIR.is_dir():
+        for path in sorted(PRODUCT_KB_DIR.iterdir()):
+            if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES:
+                images.append(path.name)
+    return {"dir": str(PRODUCT_KB_DIR), "images": images}
+
+
+@app.post("/api/product-images")
+async def upload_product_image(file: UploadFile = File(...)) -> dict[str, Any]:
+    filename = Path(file.filename or "product.png").name
+    if Path(filename).suffix.lower() not in _IMAGE_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail="只支持 png / jpg / jpeg / webp / bmp 图片",
+        )
+    PRODUCT_KB_DIR.mkdir(parents=True, exist_ok=True)
+    destination = PRODUCT_KB_DIR / filename
+    destination.write_bytes(await file.read())
+    return {"ok": True, "name": filename}
 
 
 app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

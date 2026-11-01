@@ -29,6 +29,14 @@ def _parser() -> argparse.ArgumentParser:
         choices=["demo", "openai", "comfyui"],
         help="图像生成后端（默认 demo，可覆盖 .env 中的 IMAGE_BACKEND）",
     )
+    parser.add_argument(
+        "--product-image",
+        help="产品图片路径：用这张图作为第 1 页画面，跳过该页生图",
+    )
+    parser.add_argument(
+        "--image-lecture",
+        help="单图讲解：把一张产品图拆成 5 页，逐页配音讲解成展示视频",
+    )
     parser.add_argument("--output-dir", help="任务输出目录，默认 outputs")
     parser.add_argument(
         "--resume",
@@ -117,6 +125,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"运行清单：{result.manifest_path}")
         return 0
 
+    if args.image_lecture:
+        if args.source or args.input_file:
+            print(
+                "--image-lecture 与 source/--input-file 只能选一种",
+                file=sys.stderr,
+            )
+            return 2
+        image_path = Path(args.image_lecture).expanduser().resolve()
+        if not image_path.is_file():
+            print(f"产品图片不存在：{image_path}", file=sys.stderr)
+            return 2
+        try:
+            result = VideoPipeline(settings, progress).run_image_lecture(image_path)
+        except KeyboardInterrupt:
+            print("\n任务已中断；已完成的中间文件保存在 outputs。", file=sys.stderr)
+            return 130
+        except Exception as exc:
+            print(f"\n生成失败：{exc}", file=sys.stderr)
+            return 1
+        print(f"\n任务 ID：{result.task_id}")
+        print(f"任务目录：{result.task_dir}")
+        print(f"最终视频：{result.video_path}")
+        print(f"运行清单：{result.manifest_path}")
+        return 0
+
     if args.source and args.input_file:
         print("source 与 --input-file 只能选择一个", file=sys.stderr)
         return 2
@@ -131,8 +164,17 @@ def main(argv: list[str] | None = None) -> int:
     else:
         source_text = args.source or ""
 
+    product_image: Path | None = None
+    if args.product_image:
+        product_image = Path(args.product_image).expanduser().resolve()
+        if not product_image.is_file():
+            print(f"产品图片不存在：{product_image}", file=sys.stderr)
+            return 2
+
     try:
-        result = VideoPipeline(settings, progress).run(source_text)
+        result = VideoPipeline(settings, progress).run(
+            source_text, product_image
+        )
     except KeyboardInterrupt:
         print("\n任务已中断；已完成的中间文件保存在 outputs。", file=sys.stderr)
         return 130

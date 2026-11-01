@@ -125,7 +125,7 @@ function renderCreate() {
 
   el.innerHTML = `
     <h1>新建任务</h1>
-    <p class="sub">输入一个主题或一段文案，AI 会拆成 5 页讲解并生成配音视频。</p>
+    <p class="sub">文字生成：输入主题或文案，拆成 5 页配音视频；下方也可选择单图讲解。</p>
     <div class="card pad-lg">
       <div class="field">
         <label>主题 / 文案</label>
@@ -166,6 +166,25 @@ function renderCreate() {
         </div>
         <div class="logbox" id="run-log"></div>
       </div>
+    </div>
+    <div class="card pad-lg">
+      <h2>单图讲解（配音 PPT）</h2>
+      <p class="sub">选一张产品图，把它拆成 5 页逐页配音讲解，生成类似 PPT 的展示视频。</p>
+      <div class="row">
+        <div class="field">
+          <label>产品图片</label>
+          <select id="lecture-image"></select>
+          <div class="hint">从「产品知识库」选择一张图。</div>
+        </div>
+        <div class="field">
+          <label>上传产品图片</label>
+          <input type="file" id="lecture-image-input" accept=".png,.jpg,.jpeg,.webp,.bmp" />
+          <div class="hint">上传后保存到「产品知识库」并自动选中。</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" id="lecture-btn">开始生成讲解</button>
+      </div>
     </div>`;
 
   $("#source-text").addEventListener("input", (e) => saveDraft({ source_text: e.target.value }));
@@ -179,7 +198,11 @@ function renderCreate() {
     saveDraft({ source_text: text });
     toast("已读取文件内容到输入框");
   });
+  $("#lecture-image").addEventListener("change", (e) => saveDraft({ lecture_image: e.target.value }));
+  $("#lecture-image-input").addEventListener("change", uploadProductImage);
+  loadProductImages();
   $("#run-btn").addEventListener("click", startRun);
+  $("#lecture-btn").addEventListener("click", startLecture);
   $("#cancel-btn").addEventListener("click", cancelRun);
 
   if (live) {
@@ -187,6 +210,60 @@ function renderCreate() {
     $("#progress-area").hidden = false;
     paintProgress(active);
     ensureSubscribed(active);
+  }
+}
+
+async function loadProductImages() {
+  const select = $("#lecture-image");
+  if (!select) return;
+  const current = loadDraft().lecture_image || "";
+  let names = [];
+  try {
+    const data = await api("/api/product-images");
+    names = data.images || [];
+  } catch (_) {}
+  select.innerHTML = `<option value="">请选择产品图片</option>` +
+    names.map((n) => `<option value="${esc(n)}"${n === current ? " selected" : ""}>${esc(n)}</option>`).join("");
+}
+
+async function uploadProductImage(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    const res = await fetch("/api/product-images", { method: "POST", body: form });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = (await res.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    const data = await res.json();
+    saveDraft({ lecture_image: data.name });
+    await loadProductImages();
+    toast("产品图片已上传并选中");
+  } catch (err) {
+    toast("上传失败：" + err.message, true);
+  }
+}
+
+async function startLecture() {
+  const image = $("#lecture-image") ? $("#lecture-image").value : "";
+  if (!image) { toast("请先选择产品图片", true); return; }
+  try {
+    const data = await api("/api/lecture", {
+      method: "POST",
+      body: JSON.stringify({ image }),
+    });
+    progressMap[data.task_id] = progressMap[data.task_id] || {
+      status: "queued", step: 0, total: 10, message: "排队中",
+    };
+    subscribeEvents(data.task_id);
+    refreshRunningSummary();
+    toast("已开始图片讲解生成");
+    navigate("tasks");
+  } catch (err) {
+    toast("创建失败：" + err.message, true);
   }
 }
 
