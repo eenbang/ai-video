@@ -50,7 +50,7 @@
 2. 增加 Web 页面、进度展示和任务历史。
 3. 用 10 个以上主题进行评估，分别检查主题相关性、五图一致性、语音自然度和时长同步。
 
-## 2026-10-31｜接入硅基流动 SiliconFlow
+## 2026-10-31｜接入硅基流动
 
 - 内容规划模型切到 `deepseek-ai/DeepSeek-V4-Flash`，走 SiliconFlow 的 OpenAI 兼容 `/chat/completions`。
 - 生图后端 `openai` 增加 SiliconFlow 适配：请求用 `image_size`，响应同时兼容 `images[].url` 与 `data[]`。
